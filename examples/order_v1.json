@@ -1,0 +1,9 @@
+{
+  "type": "object",
+  "properties": {
+    "order_id": {"type": "string"},
+    "item": {"type": "string"},
+    "quantity": {"type": "integer"}
+  },
+  "required": ["order_id", "item", "quantity"]
+}
