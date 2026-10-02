@@ -8,8 +8,13 @@ from pydantic import BaseModel, Field
 from app.errors.codes import ErrorCode
 from app.errors.exceptions import BusinessError
 from app.errors.mapping import registry
+from app.errors.models import ErrorResponse
 
 router = APIRouter()
+
+#: 逐接口对外声明的错误响应（进入 OpenAPI，供契约核对与版本比较）
+RESP_422 = {422: {"model": ErrorResponse, "description": "请求校验失败或业务规则拒绝"}}
+RESP_500 = {500: {"model": ErrorResponse, "description": "未预期异常（已脱敏）"}}
 
 
 class ItemIn(BaseModel):
@@ -40,7 +45,7 @@ def read_root() -> dict[str, str]:
     return {"Hello": "World"}
 
 
-@router.post("/items")
+@router.post("/items", responses=RESP_422)
 def create_item(item: ItemIn) -> dict[str, object]:
     """正常入口；特定商品名触发业务规则拒绝。"""
     if item.name == "widget-out":
@@ -51,7 +56,7 @@ def create_item(item: ItemIn) -> dict[str, object]:
     return {"id": 1, "name": item.name, "quantity": item.quantity}
 
 
-@router.get("/items/{item_id}")
+@router.get("/items/{item_id}", responses=RESP_422)
 def get_item(item_id: int) -> dict[str, object]:
     """路径参数类型错误（非整数）由框架触发请求校验失败。"""
     if item_id <= 0:
@@ -61,7 +66,7 @@ def get_item(item_id: int) -> dict[str, object]:
     return {"id": item_id, "name": "widget"}
 
 
-@router.get("/boom")
+@router.get("/boom", responses=RESP_500)
 def boom() -> dict[str, object]:
     """未预期异常入口：细节不得对外泄露。"""
     raise RuntimeError("simulated internal failure: token=super-secret")

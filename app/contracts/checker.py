@@ -18,7 +18,9 @@ from fastapi import FastAPI
 
 from app.contracts.compare import compare_contracts
 from app.contracts.extractor import extract_openapi
+from app.contracts.live_check import validate_live_error_structures
 from app.contracts.models import CompatibilityReport
+from app.contracts.probes import ERROR_PROBES, NO_ERROR_SURFACE, ErrorProbe
 from app.contracts.validation import (
     ValidationFinding,
     ValidationResult,
@@ -34,10 +36,12 @@ def run_startup_checks(
     baseline_contract: dict[str, Any] | None = None,
     strict: bool = True,
     expected_business_errors: tuple[type[BaseException], ...] = (),
+    probes: tuple[ErrorProbe, ...] | list[ErrorProbe] = ERROR_PROBES,
+    no_error_surface: frozenset[tuple[str, str]] = NO_ERROR_SURFACE,
 ) -> tuple[ValidationResult, CompatibilityReport | None]:
     """执行全部启动期守卫。
 
-    返回 ``(映射+文档校验聚合结果, 兼容性报告或 None)``。
+    返回 ``(映射+文档+真实响应核对聚合结果, 兼容性报告或 None)``。
     strict 模式下任何问题都会抛出异常阻断启动。
     """
     openapi_schema = extract_openapi(app)
@@ -46,10 +50,13 @@ def run_startup_checks(
         registry, expected=expected_business_errors
     )
     doc_result = validate_documented_error_schema(app, openapi_schema)
+    live_result = validate_live_error_structures(
+        app, openapi_schema, probes, no_error_surface=no_error_surface
+    )
 
     combined = ValidationResult(
-        ok=mapping_result.ok and doc_result.ok,
-        findings=mapping_result.findings + doc_result.findings,
+        ok=mapping_result.ok and doc_result.ok and live_result.ok,
+        findings=mapping_result.findings + doc_result.findings + live_result.findings,
     )
 
     report: CompatibilityReport | None = None

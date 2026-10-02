@@ -94,7 +94,33 @@ registry.register(OutOfStockError, ErrorCode.BUSINESS_RULE_VIOLATION)
 任何偏离都会产出带 `location`（定位到
 `components.schemas.ErrorResponse.properties.<字段>`）的 finding。
 
-### 3.2 版本兼容性判定
+### 3.2 逐接口、逐状态码的真实响应核对
+
+仅靠模型自洽不够：文档声明的错误结构必须和**每个接口真实返回**的结构一致。
+每个接口通过路由的 `responses=` 逐状态码声明错误响应（进入 OpenAPI 的
+`paths.<path>.<method>.responses.<status>`），`app/contracts/probes.py`
+为每个声明的 `(接口, 方法, 错误状态码)` 定义代表性失败请求（`ErrorProbe`）。
+
+`validate_live_error_structures`（启动守卫与 CI 都会执行）对每条探针
+**真实发请求**，把拿到的错误响应与文档声明逐字段递归核对
+（含嵌套对象与数组元素），以下任一情况都会失败并定位到
+`方法 路径 状态码.字段`（如 `POST /items 422.details[0].reason`）：
+
+- 字段多一个/少一个：真实响应含文档未声明的字段、文档必填字段真实响应缺失；
+- 字段类型不一致（含嵌套对象、数组元素内部）；
+- 接口真实返回了文档未声明的错误状态（实现改了没同步文档）；
+- 文档声明了错误状态但没有任何探针核对它（文档超前于实现也算在内）；
+- 接口完全没有错误声明且未在 `NO_ERROR_SURFACE` 中显式豁免。
+
+**覆盖范围**：所有声明了错误状态的接口方法逐状态码核对；`GET /` 这类
+没有可复现接口级错误请求的入口需在 `NO_ERROR_SURFACE` 显式登记，
+否则按「未覆盖」处理，不允许给出「通过」结论。框架级 404/405
+不属于单个接口的声明，由错误归一化测试覆盖。
+
+每条探针的核对结论都会带着 `request_id` 写入日志（`app.contracts`），
+与 `app.errors` 的归一化日志（原始异常 -> 归一化错误码）对照即可复现。
+
+### 3.3 版本兼容性判定
 
 `compare_contracts` / `compare_schemas` 对字段级变更分类：
 
@@ -110,13 +136,31 @@ registry.register(OutOfStockError, ErrorCode.BUSINESS_RULE_VIOLATION)
 破坏性变更会使校验失败，并且每条都带字段定位（如
 `components.schemas.Item.properties.name`）与说明；兼容变更不会被误判。
 
-### 3.3 启动守卫
+比较会**递归进入嵌套对象与对象数组**：嵌套字段以 `a.b`、数组元素字段以
+`items[].x` 定位，深层字段的新增/删除/类型/必填性变化按上表同一套规则判定，
+既不会漏掉也不会被误判成破坏性。
+
+错误响应声明同样纳入版本比较（`compare_error_declarations`，由
+`compare_contracts` 自动聚合），规则：
+
+| 变更 | change_type | 结论 |
+| --- | --- | --- |
+| 接口**新增**声明一个以前没写过的错误状态码 | `error_status_added` | 兼容 |
+| **删除**已声明的错误状态码 | `error_status_removed` | **破坏性** |
+| 已声明错误的结构变化 | 按字段级规则（含嵌套）递归判定 | 同上表 |
+
+每条变更都定位到接口加状态码（如 `paths./items.post.responses.422`），
+结构差异进一步定位到字段（如
+`paths./items.post.responses.422.details[].reason`）。
+
+### 3.4 启动守卫
 
 `create_app()` 默认（`APP_ENV != prod`）执行：
 
 1. 错误映射自检（冲突/未注册）；
 2. 文档错误模型与真实模型一致性；
-3. 若提供基线契约，则做兼容性比较。
+3. 逐接口真实响应核对（探针真实发请求，见 3.2）；
+4. 若提供基线契约，则做兼容性比较（含逐接口错误声明）。
 
 strict 模式下任何一项失败都会抛 `ContractMappingError` 阻断启动。
 
@@ -126,8 +170,11 @@ strict 模式下任何一项失败都会抛 `ContractMappingError` 阻断启动�
 # 安装依赖（含 pytest）
 uv sync
 
-# 运行全部单测（含正常/异常入口、映射、契约比较、文档一致性、CLI、日志）
+# 运行全部单测（含正常/异常入口、映射、契约比较、逐接口真实响应核对、CLI、日志）
 .venv/bin/python -m pytest
+
+# 只看逐接口核对的用例（日志可见 request_id 与归一化前/后的错误结论）
+.venv/bin/python -m pytest tests/test_live_check.py -v --log-cli-level=INFO
 
 # 本地起服务手工验证五类入口
 .venv/bin/uvicorn main:app --port 8099
@@ -170,7 +217,10 @@ ensure_ascii=False, indent=2, sort_keys=True)"
 - `app/errors/normalizer.py`：五类异常归一与脱敏；
 - `app/errors/handlers.py`：最外层 request_id ASGI 中间件与异常处理器；
 - `app/errors/context.py` / `logging_setup.py`：请求标识与服务端日志；
-- `app/contracts/models.py` / `schema.py` / `compare.py`：变更模型与比较规则；
+- `app/contracts/models.py` / `schema.py` / `compare.py`：变更模型与比较规则
+  （含嵌套递归与逐接口错误声明比较）；
 - `app/contracts/extractor.py` / `validation.py` / `checker.py`：
   OpenAPI 提取、文档一致性、启动守卫；
+- `app/contracts/probes.py` / `live_check.py`：代表性失败请求定义与
+  逐接口、逐状态码的真实响应核对；
 - `scripts/check_contract.py`：本地/CI 守卫命令。

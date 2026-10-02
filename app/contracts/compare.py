@@ -5,12 +5,19 @@
 - 删除字段：破坏性；
 - 类型变化：破坏性；
 - 可选 -> 必填：破坏性；必填 -> 可选：兼容。
+
+错误响应声明（逐接口、逐状态码）：
+- 接口新增声明一个以前没写过的错误状态：兼容；
+- 删除已声明的错误状态：破坏性；
+- 已声明错误的结构变化按字段级规则判定；
+- 比较会递归进入嵌套对象与对象数组（a.b / items[].x 定位）。
 """
 
 from __future__ import annotations
 
 from typing import Any
 
+from app.contracts.extractor import extract_documented_error_responses
 from app.contracts.models import (
     ChangeType,
     CompatibilityReport,
@@ -25,10 +32,15 @@ def compare_schemas(
     new: dict[str, Any],
     *,
     location_prefix: str = "",
+    old_components: dict[str, Any] | None = None,
+    new_components: dict[str, Any] | None = None,
 ) -> CompatibilityReport:
-    """比较两个 object JSON Schema，给出字段级变更与破坏性结论。"""
-    old_fields = flatten_object_schema(old)
-    new_fields = flatten_object_schema(new)
+    """比较两个 object JSON Schema，给出字段级变更与破坏性结论。
+
+    嵌套对象与对象数组会被递归展平比较；提供 components 时可解析 $ref。
+    """
+    old_fields = flatten_object_schema(old, old_components)
+    new_fields = flatten_object_schema(new, new_components)
     changes: list[FieldChange] = []
 
     for name in sorted(new_fields.keys() - old_fields.keys()):
@@ -110,10 +122,67 @@ def _change(
     )
 
 
+def compare_error_declarations(
+    old_contract: dict[str, Any], new_contract: dict[str, Any]
+) -> CompatibilityReport:
+    """比较两版契约中逐接口、逐状态码的错误响应声明。
+
+    - 新增声明错误状态：兼容；
+    - 删除已声明错误状态：破坏性；
+    - 共有状态的结构差异按字段级规则递归比较（含嵌套对象/数组）。
+    """
+    old_doc = extract_documented_error_responses(old_contract)
+    new_doc = extract_documented_error_responses(new_contract)
+    old_components = old_contract.get("components", {}) or {}
+    new_components = new_contract.get("components", {}) or {}
+
+    changes: list[FieldChange] = []
+    for key in sorted(set(old_doc) | set(new_doc)):
+        path, method = key
+        old_statuses = old_doc.get(key, {})
+        new_statuses = new_doc.get(key, {})
+        base = f"paths.{path}.{method}.responses"
+
+        for status in sorted(set(new_statuses) - set(old_statuses)):
+            changes.append(
+                FieldChange(
+                    location=f"{base}.{status}",
+                    field=str(status),
+                    change_type=ChangeType.ERROR_STATUS_ADDED,
+                    severity=Severity.COMPATIBLE,
+                    detail="接口新增声明错误状态码",
+                )
+            )
+        for status in sorted(set(old_statuses) - set(new_statuses)):
+            changes.append(
+                FieldChange(
+                    location=f"{base}.{status}",
+                    field=str(status),
+                    change_type=ChangeType.ERROR_STATUS_REMOVED,
+                    severity=Severity.BREAKING,
+                    detail="已声明的错误状态被删除，调用方无法再据此处理该错误",
+                )
+            )
+        for status in sorted(set(old_statuses) & set(new_statuses)):
+            report = compare_schemas(
+                old_statuses[status],
+                new_statuses[status],
+                location_prefix=f"{base}.{status}",
+                old_components=old_components,
+                new_components=new_components,
+            )
+            changes.extend(report.changes)
+
+    return CompatibilityReport(
+        compatible=not any(c.severity is Severity.BREAKING for c in changes),
+        changes=changes,
+    )
+
+
 def compare_contracts(
     old_contract: dict[str, Any], new_contract: dict[str, Any]
 ) -> CompatibilityReport:
-    """比较两份完整 OpenAPI 文档（聚合 components.schemas 下所有模型）。"""
+    """比较两份完整 OpenAPI 文档（组件模型 + 逐接口错误声明）。"""
     old_schemas = (old_contract.get("components", {}) or {}).get("schemas", {}) or {}
     new_schemas = (new_contract.get("components", {}) or {}).get("schemas", {}) or {}
 
@@ -124,7 +193,13 @@ def compare_contracts(
         report = compare_schemas(
             old_model, new_model,
             location_prefix=f"components.schemas.{model}.properties",
+            old_components=old_contract.get("components", {}) or {},
+            new_components=new_contract.get("components", {}) or {},
         )
         aggregated.changes.extend(report.changes)
+
+    aggregated.changes.extend(
+        compare_error_declarations(old_contract, new_contract).changes
+    )
     aggregated.compatible = not aggregated.breaking_changes
     return aggregated
