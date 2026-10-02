@@ -94,7 +94,46 @@ registry.register(OutOfStockError, ErrorCode.BUSINESS_RULE_VIOLATION)
 任何偏离都会产出带 `location`（定位到
 `components.schemas.ErrorResponse.properties.<字段>`）的 finding。
 
-### 3.2 版本兼容性判定
+### 3.2 逐接口、逐状态码的运行时核对
+
+`validate_documented_error_schema` 只保证"文档里的错误模型与代码模型自洽"，
+但兜不住"某个接口真实返回的错误结构和它对外声明的对不上"。
+`verify_error_responses`（`app/contracts/runtime_check.py`）把这条变成硬约束：
+
+**事实来源是真实请求，不是模型定义。** 每个接口登记若干"错误探针"
+（`app/contracts/probes.py`，在 `app/api/router.py` 随接口定义一起注册），
+每个探针是一次有代表性的失败请求。核对时用 TestClient **真实打接口**，
+把真实返回的 JSON 推断成结构，与文档中该接口该状态码声明的结构逐字段比对。
+
+比对是双向、递归的，以下偏离全部判失败：
+
+- 字段多一个（真实返回有、文档没声明）或少一个（文档声明了、真实不返回）；
+- 字段类型不同；
+- 必填性不同（文档必填但真实未返回，或文档可选但真实始终返回）；
+- 以上发生在嵌套对象或数组元素内部（如 `details[].message`），同样算。
+
+每条 finding 直接定位到接口+方法+状态码+字段，例如
+`POST /items [422] -> details[].message`。
+
+**覆盖范围（不允许静默通过）：**
+
+- 每个接口至少一个探针；任何接口没有探针 -> 失败；
+- 文档声明了某错误状态但没有探针真实核对 -> 失败
+  （挡住"文档先写了还没实现的错误结构"）；
+- 探针真实返回了某错误状态但文档未声明 -> 失败
+  （挡住"实现改了错误结构却忘了同步文档"）。
+
+文档中每个接口的错误响应声明（`paths.*.*.responses.<4xx/5xx>`）由探针计划
+自动生成（见 `app/main.py` 的 `_declare_error_responses`），声明与核对同源，
+人为改动任何一侧都会被上述规则抓住。404（路径未匹配）属于路由级行为，
+不在逐接口声明范围内，由统一归一逻辑与既有测试覆盖。
+
+核对日志（`app.contracts` logger）逐探针打印
+`probe=<名> <方法> <路径> [<状态码>] request_id=<标识> ok=<结论>`；
+同时 `app.errors` 的归一化日志照常输出 `raw=<原始异常> -> code=<错误码>`，
+两侧都带 request_id，可据此复现每一次被核对的失败请求。
+
+### 3.3 版本兼容性判定
 
 `compare_contracts` / `compare_schemas` 对字段级变更分类：
 
@@ -107,16 +146,34 @@ registry.register(OutOfStockError, ErrorCode.BUSINESS_RULE_VIOLATION)
 | 可选 → 必填 | `became_required` | **破坏性** |
 | 必填 → 可选 | `became_optional` | 兼容 |
 
+比较会**递归进入嵌套对象与数组元素内部**：深层字段的新增/删除/类型/
+必填变化不会被漏掉，数组元素内部的新增可选字段也只算兼容（不误判）。
+深层变更的定位形如
+`components.schemas.ErrorResponse.properties.details[].message`。
+
+错误响应声明（`paths.<接口>.<方法>.responses.<4xx/5xx>`）也纳入版本比较：
+
+| 变更 | change_type | 结论 |
+| --- | --- | --- |
+| 接口**新增声明**一个以前没写过的错误状态 | `error_status_added` | 兼容 |
+| **删除**已声明的错误状态 | `error_status_removed` | **破坏性** |
+| 已声明错误的**结构变化** | 按上表字段级规则 | 视变更而定 |
+
+结构变化的每条变更都定位到接口+状态码+字段，例如
+`paths./items.post.responses.422.details[].message`；
+声明为 `$ref` 时会解析引用后递归比较。
+
 破坏性变更会使校验失败，并且每条都带字段定位（如
 `components.schemas.Item.properties.name`）与说明；兼容变更不会被误判。
 
-### 3.3 启动守卫
+### 3.4 启动守卫
 
 `create_app()` 默认（`APP_ENV != prod`）执行：
 
 1. 错误映射自检（冲突/未注册）；
 2. 文档错误模型与真实模型一致性；
-3. 若提供基线契约，则做兼容性比较。
+3. 逐接口、逐状态码的错误结构运行时核对（真实打接口）；
+4. 若提供基线契约，则做兼容性比较。
 
 strict 模式下任何一项失败都会抛 `ContractMappingError` 阻断启动。
 
@@ -126,8 +183,12 @@ strict 模式下任何一项失败都会抛 `ContractMappingError` 阻断启动�
 # 安装依赖（含 pytest）
 uv sync
 
-# 运行全部单测（含正常/异常入口、映射、契约比较、文档一致性、CLI、日志）
+# 运行全部单测（含正常/异常入口、映射、契约比较、文档一致性、
+# 逐接口运行时核对、CLI、日志）
 .venv/bin/python -m pytest
+
+# 只跑逐接口运行时核对（日志里能看到每个探针的 request_id 与归一化结论）
+.venv/bin/python -m pytest tests/test_runtime_check.py -v --log-cli-level=INFO
 
 # 本地起服务手工验证五类入口
 .venv/bin/uvicorn main:app --port 8099
@@ -140,7 +201,7 @@ curl -i -X POST localhost:8099/items \
   -H 'Content-Type: application/json'                   # 422 business
 curl -i localhost:8099/boom                              # 500 脱敏
 
-# 契约守卫（映射 + 文档一致性）
+# 契约守卫（映射 + 文档一致性 + 逐接口运行时核对）
 .venv/bin/python -m scripts.check_contract
 
 # 与基线契约做兼容性比较；破坏性变更退出码为 1 并定位字段
@@ -170,7 +231,10 @@ ensure_ascii=False, indent=2, sort_keys=True)"
 - `app/errors/normalizer.py`：五类异常归一与脱敏；
 - `app/errors/handlers.py`：最外层 request_id ASGI 中间件与异常处理器；
 - `app/errors/context.py` / `logging_setup.py`：请求标识与服务端日志；
-- `app/contracts/models.py` / `schema.py` / `compare.py`：变更模型与比较规则；
+- `app/contracts/models.py` / `schema.py` / `compare.py`：变更模型与比较规则
+  （递归进入嵌套对象与数组，含错误响应声明的状态码级比较）；
+- `app/contracts/probes.py` / `runtime_check.py`：逐接口错误探针注册表，
+  以及基于真实请求的运行时核对（结构推断、双向精确比对、覆盖率检查）；
 - `app/contracts/extractor.py` / `validation.py` / `checker.py`：
   OpenAPI 提取、文档一致性、启动守卫；
 - `scripts/check_contract.py`：本地/CI 守卫命令。

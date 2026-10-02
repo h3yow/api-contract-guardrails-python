@@ -31,7 +31,7 @@ CODE_MESSAGE: dict[ErrorCode, str] = {
 
 # 未预期异常对外的固定脱敏文案
 INTERNAL_DETAIL = ErrorDetail(
-    location=[],
+    location=["server"],
     reason="internal_error",
     message="服务端处理时发生未预期异常，内部细节已记录并可凭请求标识排查",
 )

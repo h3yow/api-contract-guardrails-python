@@ -5,6 +5,7 @@ from __future__ import annotations
 from fastapi import APIRouter
 from pydantic import BaseModel, Field
 
+from app.contracts.probes import register_probe
 from app.errors.codes import ErrorCode
 from app.errors.exceptions import BusinessError
 from app.errors.mapping import registry
@@ -32,6 +33,40 @@ def _register_sample_errors() -> None:
 
 
 _register_sample_errors()
+
+
+def _register_sample_probes() -> None:
+    """为每个接口登记有代表性的失败请求（错误结构运行时核对的事实来源）。
+
+    每个接口至少一个探针；405 探针挂在路径主方法下（用另一种方法触发）。
+    新增接口时必须同步登记探针，否则启动守卫会因"接口未被核对"而失败。
+    """
+    # GET / ：只允许 GET，POST 触发 405
+    register_probe("get", "/", 405, "method-not-allowed",
+                   lambda c: c.post("/"))
+    # POST /items ：请求校验失败 + 业务规则拒绝 + 405
+    register_probe("post", "/items", 422, "validation-missing-fields",
+                   lambda c: c.post("/items", json={}))
+    register_probe("post", "/items", 422, "business-out-of-stock",
+                   lambda c: c.post("/items",
+                                    json={"name": "widget-out", "quantity": 1}))
+    register_probe("post", "/items", 405, "method-not-allowed",
+                   lambda c: c.get("/items"))
+    # GET /items/{item_id} ：路径参数类型错误 + 业务规则拒绝 + 405
+    register_probe("get", "/items/{item_id}", 422, "path-param-type-error",
+                   lambda c: c.get("/items/abc"))
+    register_probe("get", "/items/{item_id}", 422, "business-item-not-found",
+                   lambda c: c.get("/items/0"))
+    register_probe("get", "/items/{item_id}", 405, "method-not-allowed",
+                   lambda c: c.post("/items/1"))
+    # GET /boom ：未预期异常（500 脱敏）+ 405
+    register_probe("get", "/boom", 500, "unexpected-error",
+                   lambda c: c.get("/boom"))
+    register_probe("get", "/boom", 405, "method-not-allowed",
+                   lambda c: c.post("/boom"))
+
+
+_register_sample_probes()
 
 
 @router.get("/")

@@ -52,7 +52,7 @@ def main(argv: list[str] | None = None) -> int:
         for f in result.findings:
             print(f"  - [{f.location}] {f.message}")
     else:
-        print("[错误契约校验] 映射与文档一致性通过")
+        print("[错误契约校验] 映射、文档一致性与逐接口运行时核对全部通过")
 
     ok = result.ok and (report is None or report.compatible)
     if not ok and strict:

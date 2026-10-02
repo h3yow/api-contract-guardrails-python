@@ -11,6 +11,7 @@ from fastapi import FastAPI
 from app.api.router import OutOfStockError, router
 from app.contracts.checker import load_baseline, run_startup_checks
 from app.contracts.extractor import extract_openapi
+from app.contracts.probes import declared_statuses
 from app.errors.handlers import install_error_handlers
 from app.errors.models import ErrorDetail, ErrorResponse
 
@@ -18,6 +19,26 @@ logger = logging.getLogger("app")
 
 #: 启动期要求必须显式注册的业务异常（未注册会让启动失败）
 EXPECTED_BUSINESS_ERRORS = (OutOfStockError,)
+
+#: 各错误状态码在文档中的对外描述
+_ERROR_STATUS_DESCRIPTIONS = {
+    404: "路径未匹配（统一错误结构）",
+    405: "HTTP 方法不允许（统一错误结构）",
+    422: "请求校验失败或业务规则拒绝（统一错误结构）",
+    500: "未预期异常（已脱敏的统一错误结构）",
+}
+
+
+def _error_response_declaration(status: int) -> dict:
+    """生成某个错误状态码的 OpenAPI 响应声明（引用统一错误模型）。"""
+    return {
+        "description": _ERROR_STATUS_DESCRIPTIONS.get(status, "统一错误结构"),
+        "content": {
+            "application/json": {
+                "schema": {"$ref": "#/components/schemas/ErrorResponse"}
+            }
+        },
+    }
 
 
 def _augment_openapi_with_error_models(app: FastAPI) -> None:
@@ -41,10 +62,27 @@ def _augment_openapi_with_error_models(app: FastAPI) -> None:
             for def_name, def_schema in generated.pop("$defs", {}).items():
                 components.setdefault(def_name, def_schema)
             components[model.__name__] = generated
+        _declare_error_responses(schema)
         app.openapi_schema = schema
         return schema
 
     app.openapi = get_openapi  # type: ignore[method-assign]
+
+
+def _declare_error_responses(schema: dict) -> None:
+    """按探针计划为每个接口声明逐状态码的错误响应结构。
+
+    声明与探针同源：文档里写了哪些错误状态，运行时核对就真实打哪些，
+    二者不允许各自漂移（被 verify_error_responses 的覆盖率检查兜住）。
+    """
+    paths = schema.get("paths", {})
+    for (method, path), statuses in declared_statuses().items():
+        operation = (paths.get(path) or {}).get(method)
+        if not isinstance(operation, dict):
+            continue
+        responses = operation.setdefault("responses", {})
+        for status in sorted(statuses):
+            responses[str(status)] = _error_response_declaration(status)
 
 
 def create_app(

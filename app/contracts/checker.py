@@ -3,7 +3,8 @@
 职责：
 1. 错误映射自检（未处理/冲突不得静默降级）；
 2. 文档中的错误结构与真实响应模型一致性；
-3. 与基线 OpenAPI 契约的兼容性比较。
+3. 逐接口、逐状态码的错误结构运行时核对（真实打接口）；
+4. 与基线 OpenAPI 契约的兼容性比较。
 
 ``strict=True`` 时任一项失败都抛错，阻断开发启动。
 """
@@ -19,6 +20,7 @@ from fastapi import FastAPI
 from app.contracts.compare import compare_contracts
 from app.contracts.extractor import extract_openapi
 from app.contracts.models import CompatibilityReport
+from app.contracts.runtime_check import verify_error_responses
 from app.contracts.validation import (
     ValidationFinding,
     ValidationResult,
@@ -37,7 +39,7 @@ def run_startup_checks(
 ) -> tuple[ValidationResult, CompatibilityReport | None]:
     """执行全部启动期守卫。
 
-    返回 ``(映射+文档校验聚合结果, 兼容性报告或 None)``。
+    返回 ``(映射+文档+运行时核对聚合结果, 兼容性报告或 None)``。
     strict 模式下任何问题都会抛出异常阻断启动。
     """
     openapi_schema = extract_openapi(app)
@@ -46,10 +48,15 @@ def run_startup_checks(
         registry, expected=expected_business_errors
     )
     doc_result = validate_documented_error_schema(app, openapi_schema)
+    runtime_result = verify_error_responses(app, openapi_schema)
 
     combined = ValidationResult(
-        ok=mapping_result.ok and doc_result.ok,
-        findings=mapping_result.findings + doc_result.findings,
+        ok=mapping_result.ok and doc_result.ok and runtime_result.ok,
+        findings=(
+            mapping_result.findings
+            + doc_result.findings
+            + runtime_result.findings
+        ),
     )
 
     report: CompatibilityReport | None = None

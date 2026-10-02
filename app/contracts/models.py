@@ -15,6 +15,8 @@ class ChangeType(str, Enum):
     TYPE_CHANGED = "type_changed"          # 类型变化（破坏性）
     BECAME_REQUIRED = "became_required"    # 可选 -> 必填（破坏性）
     BECAME_OPTIONAL = "became_optional"    # 必填 -> 可选（兼容）
+    ERROR_STATUS_ADDED = "error_status_added"    # 接口新增声明错误状态（兼容）
+    ERROR_STATUS_REMOVED = "error_status_removed"  # 删除已声明错误状态（破坏性）
     NONE = "none"                          # 无变化
 
 

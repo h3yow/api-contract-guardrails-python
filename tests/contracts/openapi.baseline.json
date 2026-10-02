@@ -26,7 +26,7 @@
         "type": "string"
       },
       "ErrorDetail": {
-        "description": "单条可定位的错误原因。\n\n- ``location``：字段定位（如 [\"body\", \"age\"]；路由级错误为 [\"path\"]）。\n- ``reason``：机器可读的原因码（如 \"missing\"、\"value_error\"、\"out_of_stock\"）。\n- ``message``：面向调用方的说明，不含内部堆栈/SQL 等敏感细节。",
+        "description": "单条可定位的错误原因。\n\n- ``location``：字段定位（如 [\"body\", \"age\"]；路由级错误为 [\"path\"]）。\n- ``reason``：机器可读的原因码（如 \"missing\"、\"value_error\"、\"out_of_stock\"）。\n- ``message``：面向调用方的说明，不含内部堆栈/SQL 等敏感细节。\n\n三个字段在真实响应中始终出现（location 可为空数组），因此全部声明为\n必填——文档必须精确描述真实返回，这是逐接口严格核对的前提。",
         "properties": {
           "location": {
             "items": {
@@ -45,6 +45,7 @@
           }
         },
         "required": [
+          "location",
           "reason",
           "message"
         ],
@@ -52,7 +53,7 @@
         "type": "object"
       },
       "ErrorResponse": {
-        "description": "所有失败响应的唯一外壳结构。",
+        "description": "所有失败响应的唯一外壳结构。\n\n五个字段在真实响应中始终出现（details 可为空数组），全部必填。",
         "properties": {
           "category": {
             "$ref": "#/components/schemas/ErrorCategory"
@@ -80,7 +81,8 @@
           "code",
           "category",
           "message",
-          "request_id"
+          "request_id",
+          "details"
         ],
         "title": "ErrorResponse",
         "type": "object"
@@ -187,6 +189,16 @@
               }
             },
             "description": "Successful Response"
+          },
+          "405": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            },
+            "description": "HTTP 方法不允许（统一错误结构）"
           }
         },
         "summary": "Read Root"
@@ -208,6 +220,26 @@
               }
             },
             "description": "Successful Response"
+          },
+          "405": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            },
+            "description": "HTTP 方法不允许（统一错误结构）"
+          },
+          "500": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            },
+            "description": "未预期异常（已脱敏的统一错误结构）"
           }
         },
         "summary": "Boom"
@@ -240,15 +272,25 @@
             },
             "description": "Successful Response"
           },
+          "405": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            },
+            "description": "HTTP 方法不允许（统一错误结构）"
+          },
           "422": {
             "content": {
               "application/json": {
                 "schema": {
-                  "$ref": "#/components/schemas/HTTPValidationError"
+                  "$ref": "#/components/schemas/ErrorResponse"
                 }
               }
             },
-            "description": "Validation Error"
+            "description": "请求校验失败或业务规则拒绝（统一错误结构）"
           }
         },
         "summary": "Create Item"
@@ -282,15 +324,25 @@
             },
             "description": "Successful Response"
           },
+          "405": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            },
+            "description": "HTTP 方法不允许（统一错误结构）"
+          },
           "422": {
             "content": {
               "application/json": {
                 "schema": {
-                  "$ref": "#/components/schemas/HTTPValidationError"
+                  "$ref": "#/components/schemas/ErrorResponse"
                 }
               }
             },
-            "description": "Validation Error"
+            "description": "请求校验失败或业务规则拒绝（统一错误结构）"
           }
         },
         "summary": "Get Item"
