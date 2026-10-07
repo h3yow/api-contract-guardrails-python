@@ -7,7 +7,9 @@
 - 文档声明了某个错误状态但没有任何探针核对它 -> 失败；
 - 探针真实返回了文档未声明的错误状态 -> 失败（实现改了没同步文档）；
 - 接口完全没有错误声明且未显式豁免 -> 失败；
-- 真实响应结构与文档声明有任一字段级偏差 -> 失败并定位到字段。
+- 真实响应结构与文档声明有任一字段级偏差 -> 失败并定位到字段；
+- 文档声明的任一字段（必填或可选）在该状态码的代表性真实返回中
+  从未出现 -> 失败（文档超前于实现），递归覆盖嵌套对象与数组元素。
 """
 
 from __future__ import annotations
@@ -226,13 +228,22 @@ def _diff_instance(
     if actual_type == "object" and isinstance(instance, dict):
         props = variant.get("properties", {}) or {}
         required = set(variant.get("required", []) or [])
-        for name in sorted(required - set(instance)):
-            findings.append(
-                ValidationFinding(
-                    location=f"{location}.{name}",
-                    message="文档声明为必填字段，但真实响应缺失",
+        # 双向兜齐：文档声明的每个字段（必填或可选）都必须在真实响应中出现；
+        # 这条检查随递归进入嵌套对象/数组元素，深层缺失同样按字段路径定位。
+        for name in sorted(props):
+            child_loc = f"{location}.{name}"
+            if name not in instance:
+                if name in required:
+                    message = "文档声明为必填字段，但真实响应缺失"
+                else:
+                    message = (
+                        "文档声明了该字段（可选），但真实返回中不存在；"
+                        "字段可选不代表允许文档凭空声明"
+                    )
+                findings.append(
+                    ValidationFinding(location=child_loc, message=message)
                 )
-            )
+                continue
         for name, value in instance.items():
             child_loc = f"{location}.{name}"
             if name not in props:

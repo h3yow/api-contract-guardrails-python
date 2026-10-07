@@ -96,6 +96,127 @@ def test_missing_required_field_in_real_response_is_caught(schema) -> None:
     )
 
 
+def test_missing_optional_field_in_real_response_is_caught(schema) -> None:
+    """文档多声明一个真实从来不返回的【可选】字段也必须失败。
+
+    回归点：旧实现只核对「必填缺失」与「真实多出字段」，可选字段的
+    「文档写了、真实没返回」会被直接放过。
+    """
+    app, openapi_schema = schema
+    drifted = copy.deepcopy(openapi_schema)
+    er = drifted["components"]["schemas"]["ErrorResponse"]
+    # 注意：只加进 properties，不进 required —— 模拟文档把它标成可选
+    er["properties"]["debug_hint"] = {"type": "string"}
+    result = _check(app, drifted)
+    assert result.ok is False
+    findings = [
+        f for f in result.findings
+        if f.location.endswith(".debug_hint") and "可选" in f.message
+    ]
+    assert findings, [(f.location, f.message) for f in result.findings]
+    # 每个被核对的接口/方法/状态码都要定位清楚
+    locations = {f.location for f in findings}
+    assert any(loc.startswith("POST /items 422.") for loc in locations)
+    assert any(loc.startswith("GET /items/{item_id} 422.") for loc in locations)
+    assert any(loc.startswith("GET /boom 500.") for loc in locations)
+
+
+def test_missing_optional_nested_field_inside_object_is_caught(schema) -> None:
+    """嵌套【对象】内部文档声明、真实没返回的可选字段也要被定位。"""
+    app, openapi_schema = schema
+    drifted = copy.deepcopy(openapi_schema)
+    detail = drifted["components"]["schemas"]["ErrorDetail"]
+    # ErrorDetail 现有字段全部是真实返回的；这里凭空加一个可选深层字段
+    detail["properties"]["doc_only_flag"] = {"type": "boolean"}
+    result = _check(app, drifted)
+    assert result.ok is False
+    findings = [
+        f for f in result.findings
+        if "doc_only_flag" in f.location and "可选" in f.message
+    ]
+    assert findings, [(f.location, f.message) for f in result.findings]
+    # 定位必须深入到 details 数组元素内部，而不是只报最外层
+    assert any(
+        ".details[0].doc_only_flag" in f.location for f in findings
+    ), [f.location for f in findings]
+
+
+def test_missing_field_inside_nested_object_array_synthetic() -> None:
+    """合成接口：对象数组元素内部「文档写了、真实没返回」同样必须被抓到。
+
+    构造一个真实返回 details[].meta.hint 但文档多声明 meta.doc_only 的接口，
+    验证递归同时覆盖「嵌套对象」和「数组元素内部」两个层级。
+    """
+    from app.contracts.probes import ErrorProbe
+
+    app = FastAPI()
+
+    @app.get("/wobble")
+    def wobble() -> dict[str, object]:  # pragma: no cover - 探针直接打 500 路径
+        raise RuntimeError("synthetic")
+
+    schema = app.openapi()
+    schema["paths"]["/wobble"]["get"]["responses"]["500"] = {
+        "description": "synthetic error",
+        "content": {
+            "application/json": {
+                "schema": {"$ref": "#/components/schemas/SyntheticError"}
+            }
+        },
+    }
+    schema["components"] = {"schemas": {
+        "SyntheticError": {
+            "type": "object",
+            "required": ["code", "details"],
+            "properties": {
+                "code": {"type": "string"},
+                "details": {
+                    "type": "array",
+                    "items": {"$ref": "#/components/schemas/SyntheticDetail"},
+                },
+            },
+        },
+        "SyntheticDetail": {
+            "type": "object",
+            "required": ["meta"],
+            "properties": {
+                "meta": {
+                    "type": "object",
+                    "required": ["hint"],
+                    "properties": {
+                        "hint": {"type": "string"},
+                        # 可选的文档独有字段：真实 meta 里从不返回
+                        "doc_only": {"type": "string"},
+                    },
+                },
+            },
+        },
+    }}
+
+    # 不走统一错误处理器：直接让该路由返回一个结构固定的 JSON 500
+    @app.middleware("http")
+    async def _stub_error(request, call_next):  # pragma: no cover - 测试替身
+        from starlette.responses import JSONResponse
+        return JSONResponse(
+            status_code=500,
+            content={"code": "X", "details": [{"meta": {"hint": "h"}}]},
+        )
+
+    probe = ErrorProbe(
+        operation="/wobble", method="get", expected_status=500,
+        note="合成：数组元素内嵌套对象缺文档声明的可选字段",
+    )
+    result = validate_live_error_structures(
+        app, schema, [probe], no_error_surface=frozenset()
+    )
+    assert result.ok is False
+    assert any(
+        f.location == "GET /wobble 500.details[0].meta.doc_only"
+        and "可选" in f.message
+        for f in result.findings
+    ), [(f.location, f.message) for f in result.findings]
+
+
 def test_nested_array_item_drift_is_caught(schema) -> None:
     """嵌套数组元素里的字段类型漂移也要被定位到 details[i].reason。"""
     app, openapi_schema = schema

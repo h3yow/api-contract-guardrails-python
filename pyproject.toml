@@ -13,7 +13,9 @@ dev = [
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
-addopts = "-q"
+# 默认逐用例列出名称与通过/失败情况，便于一眼看出各业务的覆盖情况；
+# 需要更精简输出时可显式 `pytest -q`。
+addopts = "-v"
 
 [[tool.uv.index]]
 url = "https://mirrors.aliyun.com/pypi/simple/"
